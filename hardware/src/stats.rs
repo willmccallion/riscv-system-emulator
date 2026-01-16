@@ -1,5 +1,14 @@
+//! Simulation statistics collection and reporting.
+//!
+//! Tracks performance metrics including instruction counts, cache statistics,
+//! branch prediction accuracy, and execution time.
+
 use std::time::Instant;
 
+/// Simulation statistics structure tracking all performance metrics.
+///
+/// Collects detailed statistics about instruction execution, cache behavior,
+/// branch prediction, stalls, and execution time for performance analysis.
 pub struct SimStats {
     start_time: Instant,
     pub cycles: u64,
@@ -41,6 +50,7 @@ pub struct SimStats {
 }
 
 impl Default for SimStats {
+    /// Returns the default value.
     fn default() -> Self {
         Self {
             start_time: Instant::now(),
@@ -78,6 +88,10 @@ impl Default for SimStats {
 }
 
 impl SimStats {
+    /// Prints a formatted summary of all simulation statistics.
+    ///
+    /// Displays instruction counts, cache hit/miss rates, branch prediction
+    /// accuracy, IPC/CPI metrics, and execution time in a human-readable format.
     pub fn print(&self) {
         let duration = self.start_time.elapsed();
         let seconds = duration.as_secs_f64();

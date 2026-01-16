@@ -1,378 +1,809 @@
+//! Configuration system for the RISC-V simulator.
+//!
+//! Defines all configuration structures and enums used to configure
+//! the processor, memory system, caches, and pipeline. Configuration
+//! is loaded from TOML files and can be customized for different
+//! simulation scenarios.
+
 use serde::Deserialize;
 
-const DEFAULT_RAM_BASE: u64 = 0x8000_0000;
-const DEFAULT_RAM_SIZE: usize = 128 * 1024 * 1024;
-const DEFAULT_KERNEL_OFFSET: u64 = 0x1000;
+/// Default configuration constants for the simulator.
+///
+/// These values define the baseline hardware configuration when not
+/// explicitly overridden in TOML configuration files.
+mod defaults {
+    /// Base address of main system RAM (2 GiB).
+    ///
+    /// This is the physical address where the main memory region begins.
+    /// All memory accesses below this address are treated as MMIO.
+    pub const RAM_BASE: u64 = 0x8000_0000;
 
-const UART_BASE: u64 = 0x1000_0000;
-const DISK_BASE: u64 = 0x9000_0000;
-const CLINT_BASE: u64 = 0x0200_0000;
+    /// Total size of main system RAM (128 MiB).
+    ///
+    /// Defines the physical memory limit. Accesses beyond `RAM_BASE + RAM_SIZE`
+    /// will trigger a bus fault.
+    pub const RAM_SIZE: usize = 128 * 1024 * 1024;
 
-const STACK_SIZE: usize = 0x800_000;
-const BUS_WIDTH: u64 = 8;
-const BUS_LATENCY: u64 = 4;
-const CLINT_DIV: u64 = 10;
+    /// Offset from RAM base where kernel images are loaded (2 MiB).
+    ///
+    /// This offset ensures the kernel is loaded at a predictable address
+    /// while leaving space for bootloaders and initial stack.
+    pub const KERNEL_OFFSET: u64 = 0x0020_0000;
 
+    /// Base address of UART 16550-compatible serial port MMIO region.
+    pub const UART_BASE: u64 = 0x1000_0000;
+
+    /// Base address of VirtIO block device MMIO region.
+    pub const DISK_BASE: u64 = 0x9000_0000;
+
+    /// Base address of CLINT (Core Local Interruptor) timer MMIO region.
+    pub const CLINT_BASE: u64 = 0x0200_0000;
+
+    /// Base address of system controller (power/reset) MMIO region.
+    pub const SYSCON_BASE: u64 = 0x0010_0000;
+
+    /// System bus width in bytes (8 bytes = 64-bit bus).
+    ///
+    /// Determines the maximum transfer size per bus transaction.
+    pub const BUS_WIDTH: u64 = 8;
+
+    /// System bus access latency in cycles.
+    ///
+    /// Fixed overhead for all bus transactions regardless of access type.
+    pub const BUS_LATENCY: u64 = 4;
+
+    /// CLINT timer divider (mtime increments every N cycles).
+    ///
+    /// Divides the simulation cycle counter to produce the machine timer value.
+    pub const CLINT_DIVIDER: u64 = 10;
+
+    /// CAS (Column Access Strobe) latency in DRAM cycles.
+    ///
+    /// Time from column address assertion to data availability for reads.
+    pub const T_CAS: u64 = 14;
+
+    /// RAS (Row Access Strobe) latency in DRAM cycles.
+    ///
+    /// Time required to activate a DRAM row before column access.
+    pub const T_RAS: u64 = 14;
+
+    /// Precharge latency in DRAM cycles.
+    ///
+    /// Time required to close an active row before opening a new one.
+    pub const T_PRE: u64 = 14;
+
+    /// Row buffer miss penalty in DRAM cycles.
+    ///
+    /// Additional latency when accessing a different row than the one
+    /// currently open in the row buffer.
+    pub const ROW_MISS_LATENCY: u64 = 120;
+
+    /// Translation Lookaside Buffer entry count.
+    ///
+    /// Number of virtual-to-physical address translations cached in the TLB.
+    pub const TLB_SIZE: usize = 32;
+
+    /// Default cache size in bytes (4 KiB).
+    pub const CACHE_SIZE: usize = 4096;
+
+    /// Default cache line size in bytes (64 bytes).
+    ///
+    /// Matches typical modern processor cache line sizes and DRAM burst length.
+    pub const CACHE_LINE: usize = 64;
+
+    /// Default cache associativity (1 way = direct-mapped).
+    pub const CACHE_WAYS: usize = 1;
+
+    /// Default cache access latency in cycles.
+    pub const CACHE_LATENCY: u64 = 1;
+
+    /// Default prefetcher pattern table size (64 entries).
+    pub const PREFETCH_TABLE_SIZE: usize = 64;
+
+    /// Default prefetch degree (1 line per trigger).
+    pub const PREFETCH_DEGREE: usize = 1;
+
+    /// Default pipeline width (1 instruction per cycle).
+    pub const PIPELINE_WIDTH: usize = 1;
+
+    /// Default Branch Target Buffer size (256 entries).
+    pub const BTB_SIZE: usize = 256;
+
+    /// Default Return Address Stack size (8 entries).
+    pub const RAS_SIZE: usize = 8;
+
+    /// Default number of TAGE predictor banks (4 tagged tables).
+    pub const TAGE_BANKS: usize = 4;
+
+    /// Default TAGE predictor table size (2048 entries per bank).
+    pub const TAGE_TABLE_SIZE: usize = 2048;
+
+    /// Default TAGE loop predictor table size (256 entries).
+    pub const TAGE_LOOP_SIZE: usize = 256;
+
+    /// Default TAGE useful counter reset interval (256K branches).
+    pub const TAGE_RESET_INTERVAL: u32 = 256_000;
+
+    /// Default Perceptron predictor global history length (32 bits).
+    pub const PERCEPTRON_HISTORY: usize = 32;
+
+    /// Default Perceptron predictor table size (log2, 1024 entries).
+    pub const PERCEPTRON_TABLE_BITS: usize = 10;
+
+    /// Default Tournament predictor global history table size (log2, 4096 entries).
+    pub const TOURNAMENT_GLOBAL_BITS: usize = 12;
+
+    /// Default Tournament predictor local history table size (log2, 1024 entries).
+    pub const TOURNAMENT_LOCAL_HIST_BITS: usize = 10;
+
+    /// Default Tournament predictor local prediction table size (log2, 1024 entries).
+    pub const TOURNAMENT_LOCAL_PRED_BITS: usize = 10;
+}
+
+/// Memory controller implementation types.
+///
+/// Specifies the type of memory controller used to model main memory
+/// access timing and behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum MemoryController {
+    /// Simple fixed-latency memory controller.
+    ///
+    /// All memory accesses take a fixed number of cycles regardless
+    /// of address patterns or row buffer state.
+    #[default]
+    Simple,
+    /// DRAM controller with row buffer modeling.
+    ///
+    /// Models DRAM timing including CAS, RAS, precharge latencies
+    /// and row buffer hit/miss penalties for more accurate timing.
+    #[serde(alias = "DRAM")]
+    Dram,
+}
+
+/// Cache replacement policy algorithms.
+///
+/// Specifies the algorithm used to select which cache line to evict
+/// when a new line must be installed in a full cache set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ReplacementPolicy {
+    /// Least Recently Used replacement policy.
+    ///
+    /// Evicts the cache line that was accessed least recently.
+    #[default]
+    #[serde(alias = "Lru")]
+    Lru,
+    /// Pseudo-LRU (tree-based) replacement policy.
+    ///
+    /// Approximates LRU using a binary tree structure for lower
+    /// hardware overhead while maintaining good performance.
+    #[serde(alias = "Plru")]
+    Plru,
+    /// First In First Out replacement policy.
+    ///
+    /// Evicts the oldest cache line in the set (round-robin).
+    #[serde(alias = "Fifo")]
+    Fifo,
+    /// Random replacement policy.
+    ///
+    /// Evicts a randomly selected cache line from the set.
+    #[serde(alias = "Random")]
+    Random,
+    /// Most Recently Used replacement policy.
+    ///
+    /// Evicts the cache line that was accessed most recently.
+    /// Effective for cyclic access patterns larger than the cache.
+    #[serde(alias = "Mru")]
+    Mru,
+}
+
+/// Hardware prefetcher types for cache prefetching.
+///
+/// Prefetchers predict future memory accesses and fetch data
+/// into the cache before it is needed to reduce miss penalties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum Prefetcher {
+    /// No prefetching enabled.
+    #[default]
+    None,
+    /// Next-line prefetcher.
+    ///
+    /// Prefetches the next sequential cache line after each access.
+    NextLine,
+    /// Stride prefetcher.
+    ///
+    /// Detects stride patterns in memory accesses and prefetches
+    /// addresses following the detected stride.
+    Stride,
+    /// Stream prefetcher.
+    ///
+    /// Detects sequential stream direction (ascending/descending) and
+    /// prefetches multiple lines ahead.
+    Stream,
+    /// Tagged prefetcher.
+    ///
+    /// Prefetches on demand misses and on hits to previously prefetched lines.
+    Tagged,
+}
+
+/// Branch prediction algorithm types.
+///
+/// Specifies the branch prediction algorithm used to predict
+/// branch directions and targets for improved pipeline performance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum BranchPredictor {
+    /// Static branch predictor (always predict not-taken).
+    ///
+    /// Simple predictor that always predicts branches as not-taken.
+    #[default]
+    Static,
+    /// Global history branch predictor (gshare).
+    ///
+    /// Uses global branch history to index a pattern history table.
+    GShare,
+    /// Perceptron-based neural branch predictor.
+    ///
+    /// Uses a neural network (perceptron) to learn branch patterns.
+    Perceptron,
+    /// Tagged Geometric History Length predictor.
+    ///
+    /// Advanced predictor using multiple history lengths with tags.
+    #[serde(alias = "TAGE")]
+    Tage,
+    /// Tournament predictor combining local and global predictors.
+    ///
+    /// Selects between local and global predictors based on performance.
+    Tournament,
+}
+
+/// Root configuration structure containing all simulator settings.
+///
+/// This is the top-level configuration structure loaded from TOML files
+/// that specifies all aspects of the simulator including memory, caches,
+/// pipeline, and branch prediction.
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    /// General simulation settings
     pub general: GeneralConfig,
+    /// System memory map and bus parameters
     pub system: SystemConfig,
+    /// Main memory configuration
     pub memory: MemoryConfig,
+    /// Cache hierarchy configuration
     pub cache: CacheHierarchyConfig,
+    /// Pipeline and branch predictor configuration
     pub pipeline: PipelineConfig,
 }
 
+/// General simulation settings and options.
+///
+/// Contains high-level simulation configuration such as tracing
+/// and initial program counter.
 #[derive(Debug, Deserialize)]
 pub struct GeneralConfig {
+    /// Enable instruction tracing to stderr and debug output (hang detection, status updates, mode switches)
+    #[serde(default)]
     pub trace_instructions: bool,
-    #[serde(default = "default_start_pc")]
-    pub start_pc: String,
-    #[serde(default = "default_stack_size")]
-    pub user_stack_size: usize,
+
+    /// Initial PC value (defaults to RAM base)
+    #[serde(default = "GeneralConfig::default_start_pc")]
+    pub start_pc: u64,
 }
 
 impl GeneralConfig {
-    pub fn start_pc_val(&self) -> u64 {
-        let s = self.start_pc.trim_start_matches("0x");
-        u64::from_str_radix(s, 16).unwrap_or(DEFAULT_RAM_BASE)
+    /// Returns the default starting program counter.
+    ///
+    /// Initializes execution at the RAM base address, which is the standard
+    /// entry point for bare-metal binaries.
+    fn default_start_pc() -> u64 {
+        defaults::RAM_BASE
     }
 }
 
+impl Default for GeneralConfig {
+    /// Creates a default general configuration.
+    ///
+    /// Instruction tracing is disabled and the start PC is set to RAM base.
+    fn default() -> Self {
+        Self {
+            trace_instructions: false,
+            start_pc: defaults::RAM_BASE,
+        }
+    }
+}
+
+/// System memory map and bus configuration.
+///
+/// Defines memory-mapped I/O base addresses, RAM configuration,
+/// and system bus parameters.
 #[derive(Debug, Deserialize)]
 pub struct SystemConfig {
-    #[serde(default = "default_uart_base")]
-    pub uart_base: String,
+    /// UART MMIO base address
+    #[serde(default = "SystemConfig::default_uart_base")]
+    pub uart_base: u64,
 
-    #[serde(default = "default_disk_base")]
-    pub disk_base: String,
+    /// VirtIO disk MMIO base address
+    #[serde(default = "SystemConfig::default_disk_base")]
+    pub disk_base: u64,
 
-    #[serde(default = "default_ram_base")]
-    pub ram_base: String,
+    /// Main RAM base address
+    #[serde(default = "SystemConfig::default_ram_base")]
+    pub ram_base: u64,
 
-    #[serde(default = "default_clint_base")]
-    pub clint_base: String,
+    /// CLINT (timer) MMIO base address
+    #[serde(default = "SystemConfig::default_clint_base")]
+    pub clint_base: u64,
 
-    #[serde(default = "default_kernel_offset")]
+    /// Syscon (power control) MMIO base address
+    #[serde(default = "SystemConfig::default_syscon_base")]
+    pub syscon_base: u64,
+
+    /// Kernel load offset from RAM base
+    #[serde(default = "SystemConfig::default_kernel_offset")]
     pub kernel_offset: u64,
 
-    #[serde(default = "default_bus_width")]
+    /// System bus width in bytes
+    #[serde(default = "SystemConfig::default_bus_width")]
     pub bus_width: u64,
 
-    #[serde(default = "default_bus_latency")]
+    /// System bus latency in cycles
+    #[serde(default = "SystemConfig::default_bus_latency")]
     pub bus_latency: u64,
 
-    #[serde(default = "default_clint_div")]
+    /// CLINT timer divider (mtime increments every N cycles)
+    #[serde(default = "SystemConfig::default_clint_divider")]
     pub clint_divider: u64,
-
-    #[serde(default = "default_syscon_base")]
-    pub syscon_base: String,
 }
 
 impl SystemConfig {
-    pub fn uart_base_val(&self) -> u64 {
-        parse_hex(&self.uart_base, UART_BASE)
+    /// Returns the default UART MMIO base address.
+    fn default_uart_base() -> u64 {
+        defaults::UART_BASE
     }
 
-    pub fn disk_base_val(&self) -> u64 {
-        parse_hex(&self.disk_base, DISK_BASE)
+    /// Returns the default VirtIO disk MMIO base address.
+    fn default_disk_base() -> u64 {
+        defaults::DISK_BASE
     }
 
-    pub fn ram_base_val(&self) -> u64 {
-        parse_hex(&self.ram_base, DEFAULT_RAM_BASE)
+    /// Returns the default RAM base address.
+    fn default_ram_base() -> u64 {
+        defaults::RAM_BASE
     }
 
-    pub fn clint_base_val(&self) -> u64 {
-        parse_hex(&self.clint_base, CLINT_BASE)
+    /// Returns the default CLINT MMIO base address.
+    fn default_clint_base() -> u64 {
+        defaults::CLINT_BASE
     }
 
-    pub fn syscon_base_val(&self) -> u64 {
-        parse_hex(&self.syscon_base, 0x100000)
+    /// Returns the default system controller MMIO base address.
+    fn default_syscon_base() -> u64 {
+        defaults::SYSCON_BASE
+    }
+
+    /// Returns the default kernel load offset from RAM base.
+    fn default_kernel_offset() -> u64 {
+        defaults::KERNEL_OFFSET
+    }
+
+    /// Returns the default system bus width in bytes.
+    fn default_bus_width() -> u64 {
+        defaults::BUS_WIDTH
+    }
+
+    /// Returns the default system bus latency in cycles.
+    fn default_bus_latency() -> u64 {
+        defaults::BUS_LATENCY
+    }
+
+    /// Returns the default CLINT timer divider value.
+    fn default_clint_divider() -> u64 {
+        defaults::CLINT_DIVIDER
     }
 }
 
+impl Default for SystemConfig {
+    /// Creates a default system configuration.
+    ///
+    /// All MMIO base addresses, bus parameters, and kernel offset are set
+    /// to their default values from the `defaults` module.
+    fn default() -> Self {
+        Self {
+            uart_base: defaults::UART_BASE,
+            disk_base: defaults::DISK_BASE,
+            ram_base: defaults::RAM_BASE,
+            clint_base: defaults::CLINT_BASE,
+            syscon_base: defaults::SYSCON_BASE,
+            kernel_offset: defaults::KERNEL_OFFSET,
+            bus_width: defaults::BUS_WIDTH,
+            bus_latency: defaults::BUS_LATENCY,
+            clint_divider: defaults::CLINT_DIVIDER,
+        }
+    }
+}
+
+/// Main memory system configuration.
+///
+/// Specifies RAM size, memory controller type, DRAM timing parameters,
+/// and TLB configuration.
 #[derive(Debug, Deserialize)]
 pub struct MemoryConfig {
-    #[serde(default = "default_ram_size")]
-    pub ram_size: String,
+    /// RAM size in bytes
+    #[serde(default = "MemoryConfig::default_ram_size")]
+    pub ram_size: usize,
 
-    #[serde(default = "default_controller")]
-    pub controller: String,
+    /// Memory controller type
+    #[serde(default)]
+    pub controller: MemoryController,
 
-    #[serde(default = "default_t_cas")]
+    /// CAS latency (column access strobe)
+    #[serde(default = "MemoryConfig::default_t_cas")]
     pub t_cas: u64,
 
-    #[serde(default = "default_t_ras")]
+    /// RAS latency (row access strobe)
+    #[serde(default = "MemoryConfig::default_t_ras")]
     pub t_ras: u64,
 
-    #[serde(default = "default_t_pre")]
+    /// Precharge latency
+    #[serde(default = "MemoryConfig::default_t_pre")]
     pub t_pre: u64,
 
-    #[serde(default = "default_row_miss")]
+    /// Row buffer miss penalty
+    #[serde(default = "MemoryConfig::default_row_miss")]
     pub row_miss_latency: u64,
 
-    #[serde(default = "default_tlb_size")]
+    /// TLB entry count
+    #[serde(default = "MemoryConfig::default_tlb_size")]
     pub tlb_size: usize,
 }
 
 impl MemoryConfig {
-    pub fn ram_size_val(&self) -> usize {
-        let s = self.ram_size.trim_start_matches("0x");
-        usize::from_str_radix(s, 16).unwrap_or(DEFAULT_RAM_SIZE)
+    /// Returns the default RAM size in bytes.
+    fn default_ram_size() -> usize {
+        defaults::RAM_SIZE
+    }
+
+    /// Returns the default CAS latency in DRAM cycles.
+    fn default_t_cas() -> u64 {
+        defaults::T_CAS
+    }
+
+    /// Returns the default RAS latency in DRAM cycles.
+    fn default_t_ras() -> u64 {
+        defaults::T_RAS
+    }
+
+    /// Returns the default precharge latency in DRAM cycles.
+    fn default_t_pre() -> u64 {
+        defaults::T_PRE
+    }
+
+    /// Returns the default row buffer miss penalty in DRAM cycles.
+    fn default_row_miss() -> u64 {
+        defaults::ROW_MISS_LATENCY
+    }
+
+    /// Returns the default TLB entry count.
+    fn default_tlb_size() -> usize {
+        defaults::TLB_SIZE
     }
 }
 
-fn parse_hex(s: &str, default: u64) -> u64 {
-    let s = s.trim_start_matches("0x");
-    u64::from_str_radix(s, 16).unwrap_or(default)
+impl Default for MemoryConfig {
+    /// Creates a default memory configuration.
+    ///
+    /// Uses simple memory controller, default DRAM timing parameters,
+    /// and standard TLB size.
+    fn default() -> Self {
+        Self {
+            ram_size: defaults::RAM_SIZE,
+            controller: MemoryController::default(),
+            t_cas: defaults::T_CAS,
+            t_ras: defaults::T_RAS,
+            t_pre: defaults::T_PRE,
+            row_miss_latency: defaults::ROW_MISS_LATENCY,
+            tlb_size: defaults::TLB_SIZE,
+        }
+    }
 }
 
-fn default_start_pc() -> String {
-    format!("{:#x}", DEFAULT_RAM_BASE)
-}
-
-fn default_stack_size() -> usize {
-    STACK_SIZE
-}
-
-fn default_uart_base() -> String {
-    format!("{:#x}", UART_BASE)
-}
-
-fn default_disk_base() -> String {
-    format!("{:#x}", DISK_BASE)
-}
-
-fn default_ram_base() -> String {
-    format!("{:#x}", DEFAULT_RAM_BASE)
-}
-
-fn default_clint_base() -> String {
-    format!("{:#x}", CLINT_BASE)
-}
-
-fn default_ram_size() -> String {
-    format!("{:#x}", DEFAULT_RAM_SIZE)
-}
-
-fn default_kernel_offset() -> u64 {
-    DEFAULT_KERNEL_OFFSET
-}
-
-fn default_bus_width() -> u64 {
-    BUS_WIDTH
-}
-
-fn default_bus_latency() -> u64 {
-    BUS_LATENCY
-}
-
-fn default_clint_div() -> u64 {
-    CLINT_DIV
-}
-
-fn default_syscon_base() -> String {
-    format!("{:#x}", 0x100000)
-}
-
-fn default_controller() -> String {
-    "Simple".to_string()
-}
-
-fn default_row_miss() -> u64 {
-    120
-}
-
-fn default_tlb_size() -> usize {
-    32
-}
-
-fn default_t_cas() -> u64 {
-    14
-}
-
-fn default_t_ras() -> u64 {
-    14
-}
-
-fn default_t_pre() -> u64 {
-    14
-}
-
-#[derive(Debug, Deserialize, Clone)]
+/// Cache hierarchy configuration.
+#[derive(Debug, Clone, Deserialize)]
 pub struct CacheHierarchyConfig {
+    /// L1 instruction cache
     pub l1_i: CacheConfig,
+    /// L1 data cache
     pub l1_d: CacheConfig,
+    /// Unified L2 cache
     pub l2: CacheConfig,
+    /// Unified L3 cache (optional)
     pub l3: CacheConfig,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+/// Individual cache level configuration.
+#[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
+    /// Enable this cache level
+    #[serde(default)]
     pub enabled: bool,
 
-    #[serde(default = "d_c_size")]
+    /// Total cache size in bytes
+    #[serde(default = "CacheConfig::default_size")]
     pub size_bytes: usize,
 
-    #[serde(default = "d_c_line")]
+    /// Cache line size in bytes
+    #[serde(default = "CacheConfig::default_line")]
     pub line_bytes: usize,
 
-    #[serde(default = "d_c_ways")]
+    /// Associativity (number of ways)
+    #[serde(default = "CacheConfig::default_ways")]
     pub ways: usize,
 
-    #[serde(default = "d_c_policy")]
-    pub policy: String,
+    /// Replacement policy
+    #[serde(default)]
+    pub policy: ReplacementPolicy,
 
-    #[serde(default = "d_c_lat")]
+    /// Access latency in cycles
+    #[serde(default = "CacheConfig::default_latency")]
     pub latency: u64,
 
-    #[serde(default = "d_c_pref")]
-    pub prefetcher: String,
+    /// Hardware prefetcher type
+    #[serde(default)]
+    pub prefetcher: Prefetcher,
 
-    #[serde(default = "d_c_pref_t")]
+    /// Prefetcher table size (for stride prefetcher)
+    #[serde(default = "CacheConfig::default_prefetch_table")]
     pub prefetch_table_size: usize,
 
-    #[serde(default = "d_c_pref_d")]
+    /// Prefetch degree (lines to prefetch per trigger)
+    #[serde(default = "CacheConfig::default_prefetch_degree")]
     pub prefetch_degree: usize,
 }
 
-fn d_c_size() -> usize {
-    4096
+impl CacheConfig {
+    /// Returns the default cache size in bytes.
+    fn default_size() -> usize {
+        defaults::CACHE_SIZE
+    }
+
+    /// Returns the default cache line size in bytes.
+    fn default_line() -> usize {
+        defaults::CACHE_LINE
+    }
+
+    /// Returns the default cache associativity (number of ways).
+    fn default_ways() -> usize {
+        defaults::CACHE_WAYS
+    }
+
+    /// Returns the default cache access latency in cycles.
+    fn default_latency() -> u64 {
+        defaults::CACHE_LATENCY
+    }
+
+    /// Returns the default prefetcher pattern table size.
+    fn default_prefetch_table() -> usize {
+        defaults::PREFETCH_TABLE_SIZE
+    }
+
+    /// Returns the default prefetch degree (lines per trigger).
+    fn default_prefetch_degree() -> usize {
+        defaults::PREFETCH_DEGREE
+    }
 }
 
-fn d_c_line() -> usize {
-    64
+impl Default for CacheConfig {
+    /// Creates a default cache configuration.
+    ///
+    /// Cache is disabled by default, uses direct-mapped associativity,
+    /// LRU replacement, no prefetching, and minimal size.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            size_bytes: defaults::CACHE_SIZE,
+            line_bytes: defaults::CACHE_LINE,
+            ways: defaults::CACHE_WAYS,
+            policy: ReplacementPolicy::default(),
+            latency: defaults::CACHE_LATENCY,
+            prefetcher: Prefetcher::default(),
+            prefetch_table_size: defaults::PREFETCH_TABLE_SIZE,
+            prefetch_degree: defaults::PREFETCH_DEGREE,
+        }
+    }
 }
 
-fn d_c_ways() -> usize {
-    1
-}
-
-fn d_c_policy() -> String {
-    "LRU".to_string()
-}
-
-fn d_c_lat() -> u64 {
-    1
-}
-
-fn d_c_pref() -> String {
-    "None".to_string()
-}
-
-fn d_c_pref_t() -> usize {
-    64
-}
-
-fn d_c_pref_d() -> usize {
-    1
-}
-
-#[derive(Debug, Deserialize, Clone)]
+/// Pipeline and branch predictor configuration.
+#[derive(Debug, Clone, Deserialize)]
 pub struct PipelineConfig {
-    #[serde(default = "default_width")]
+    /// Superscalar width (instructions per cycle)
+    #[serde(default = "PipelineConfig::default_width")]
     pub width: usize,
 
-    pub branch_predictor: String,
+    /// Branch predictor type
+    #[serde(default)]
+    pub branch_predictor: BranchPredictor,
+
+    /// Branch Target Buffer size
+    #[serde(default = "PipelineConfig::default_btb_size")]
     pub btb_size: usize,
+
+    /// Return Address Stack size
+    #[serde(default = "PipelineConfig::default_ras_size")]
     pub ras_size: usize,
+
+    /// MISA register override (e.g., "RV64IMAFDC")
+    #[serde(default)]
     pub misa_override: Option<String>,
 
+    /// TAGE predictor configuration
     #[serde(default)]
     pub tage: TageConfig,
 
+    /// Perceptron predictor configuration
     #[serde(default)]
     pub perceptron: PerceptronConfig,
 
+    /// Tournament predictor configuration
     #[serde(default)]
     pub tournament: TournamentConfig,
 }
 
-fn default_width() -> usize {
-    1
+impl PipelineConfig {
+    /// Returns the default pipeline width (instructions per cycle).
+    fn default_width() -> usize {
+        defaults::PIPELINE_WIDTH
+    }
+
+    /// Returns the default Branch Target Buffer size.
+    fn default_btb_size() -> usize {
+        defaults::BTB_SIZE
+    }
+
+    /// Returns the default Return Address Stack size.
+    fn default_ras_size() -> usize {
+        defaults::RAS_SIZE
+    }
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+impl Default for PipelineConfig {
+    /// Creates a default pipeline configuration.
+    ///
+    /// Uses single-issue width, static branch predictor, and default
+    /// sizes for BTB and RAS structures.
+    fn default() -> Self {
+        Self {
+            width: defaults::PIPELINE_WIDTH,
+            branch_predictor: BranchPredictor::default(),
+            btb_size: defaults::BTB_SIZE,
+            ras_size: defaults::RAS_SIZE,
+            misa_override: None,
+            tage: TageConfig::default(),
+            perceptron: PerceptronConfig::default(),
+            tournament: TournamentConfig::default(),
+        }
+    }
+}
+
+/// TAGE (Tagged Geometric) predictor configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct TageConfig {
-    #[serde(default = "d_t_b")]
+    /// Number of tagged tables
+    #[serde(default = "TageConfig::default_banks")]
     pub num_banks: usize,
 
-    #[serde(default = "d_t_s")]
+    /// Entries per table
+    #[serde(default = "TageConfig::default_table_size")]
     pub table_size: usize,
 
-    #[serde(default = "d_t_l")]
+    /// Loop predictor table size
+    #[serde(default = "TageConfig::default_loop_size")]
     pub loop_table_size: usize,
 
-    #[serde(default = "d_t_r")]
+    /// Useful counter reset interval
+    #[serde(default = "TageConfig::default_reset_interval")]
     pub reset_interval: u32,
 
-    #[serde(default = "d_t_h")]
+    /// History lengths for each bank
+    #[serde(default = "TageConfig::default_history_lengths")]
     pub history_lengths: Vec<usize>,
 
-    #[serde(default = "d_t_tag")]
+    /// Tag widths for each bank
+    #[serde(default = "TageConfig::default_tag_widths")]
     pub tag_widths: Vec<usize>,
 }
 
-fn d_t_b() -> usize {
-    4
+impl TageConfig {
+    /// Returns the default number of TAGE predictor banks.
+    fn default_banks() -> usize {
+        defaults::TAGE_BANKS
+    }
+
+    /// Returns the default TAGE predictor table size per bank.
+    fn default_table_size() -> usize {
+        defaults::TAGE_TABLE_SIZE
+    }
+
+    /// Returns the default TAGE loop predictor table size.
+    fn default_loop_size() -> usize {
+        defaults::TAGE_LOOP_SIZE
+    }
+
+    /// Returns the default TAGE useful counter reset interval.
+    fn default_reset_interval() -> u32 {
+        defaults::TAGE_RESET_INTERVAL
+    }
+
+    /// Returns the default history lengths for each TAGE bank.
+    ///
+    /// Provides geometric progression of history lengths: [5, 15, 44, 130].
+    fn default_history_lengths() -> Vec<usize> {
+        vec![5, 15, 44, 130]
+    }
+
+    /// Returns the default tag widths for each TAGE bank.
+    ///
+    /// Tag widths increase with history length: [9, 9, 10, 10] bits.
+    fn default_tag_widths() -> Vec<usize> {
+        vec![9, 9, 10, 10]
+    }
 }
 
-fn d_t_s() -> usize {
-    2048
-}
-
-fn d_t_l() -> usize {
-    256
-}
-
-fn d_t_r() -> u32 {
-    256_000
-}
-
-fn d_t_h() -> Vec<usize> {
-    vec![5, 15, 44, 130]
-}
-
-fn d_t_tag() -> Vec<usize> {
-    vec![9, 9, 10, 10]
-}
-
-#[derive(Debug, Deserialize, Clone, Default)]
+/// Perceptron branch predictor configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct PerceptronConfig {
-    #[serde(default = "d_p_h")]
+    /// Global history length
+    #[serde(default = "PerceptronConfig::default_history")]
     pub history_length: usize,
 
-    #[serde(default = "d_p_b")]
+    /// Log2 of perceptron table size
+    #[serde(default = "PerceptronConfig::default_table_bits")]
     pub table_bits: usize,
 }
 
-fn d_p_h() -> usize {
-    32
+impl PerceptronConfig {
+    /// Returns the default Perceptron predictor global history length.
+    fn default_history() -> usize {
+        defaults::PERCEPTRON_HISTORY
+    }
+
+    /// Returns the default Perceptron predictor table size (log2).
+    fn default_table_bits() -> usize {
+        defaults::PERCEPTRON_TABLE_BITS
+    }
 }
 
-fn d_p_b() -> usize {
-    10
-}
-
-#[derive(Debug, Deserialize, Clone, Default)]
+/// Tournament branch predictor configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct TournamentConfig {
-    #[serde(default = "d_to_g")]
+    /// Global predictor size (log2)
+    #[serde(default = "TournamentConfig::default_global")]
     pub global_size_bits: usize,
 
-    #[serde(default = "d_to_l")]
+    /// Local history table size (log2)
+    #[serde(default = "TournamentConfig::default_local_hist")]
     pub local_hist_bits: usize,
 
-    #[serde(default = "d_to_p")]
+    /// Local prediction table size (log2)
+    #[serde(default = "TournamentConfig::default_local_pred")]
     pub local_pred_bits: usize,
 }
 
-fn d_to_g() -> usize {
-    12
-}
+impl TournamentConfig {
+    /// Returns the default Tournament predictor global history table size (log2).
+    fn default_global() -> usize {
+        defaults::TOURNAMENT_GLOBAL_BITS
+    }
 
-fn d_to_l() -> usize {
-    10
-}
+    /// Returns the default Tournament predictor local history table size (log2).
+    fn default_local_hist() -> usize {
+        defaults::TOURNAMENT_LOCAL_HIST_BITS
+    }
 
-fn d_to_p() -> usize {
-    10
+    /// Returns the default Tournament predictor local prediction table size (log2).
+    fn default_local_pred() -> usize {
+        defaults::TOURNAMENT_LOCAL_PRED_BITS
+    }
 }

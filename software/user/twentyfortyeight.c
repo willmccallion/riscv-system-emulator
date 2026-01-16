@@ -204,12 +204,16 @@ int move_down() {
 int main() {
   init_game();
   char buf[16];
+  int needs_redraw = 1; // Draw once at start
 
   while (1) {
-    draw();
-    if (win) {
-      printf(C_128 "\nYOU WIN! (2048 Reached)\n" COLOR_RESET);
-      win = 0; // Continue playing
+    if (needs_redraw) {
+      draw();
+      if (win) {
+        printf(C_128 "\nYOU WIN! (2048 Reached)\n" COLOR_RESET);
+        win = 0; // Continue playing
+      }
+      needs_redraw = 0;
     }
 
     // Use gets to wait for Enter key
@@ -229,11 +233,13 @@ int main() {
       break;
     else if (c == 'r') {
       init_game();
+      needs_redraw = 1;
       continue;
     }
 
     if (moved) {
       spawn_tile();
+      needs_redraw = 1;
     }
   }
 

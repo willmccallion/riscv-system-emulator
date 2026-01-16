@@ -1,7 +1,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 
-#define SIZE 1024
+#define SIZE 102400
 
 long arr[SIZE];
 
@@ -90,10 +90,31 @@ int main(void) {
     }
   }
 
-  if (sorted)
-    printf("SUCCESS: Array is sorted.\n");
-  else
-    printf("FAILURE: Array is NOT sorted.\n");
+  // #region agent log
+  // Write debug info to memory-mapped debug region at 0x80010000 (1MB into RAM)
+  volatile int *debug_sorted = (volatile int *)0x80010000;
+  volatile int *debug_marker = (volatile int *)0x80010004;
+  *debug_sorted = sorted;
+  *debug_marker = 0xDEADBEEF; // Marker for "verification complete"
+  // #endregion
 
+  if (sorted) {
+    // #region agent log
+    *debug_marker = 0x50000001; // Marker for "about to print SUCCESS"
+    // #endregion
+    printf("SUCCESS: Array is sorted.\n");
+    // #region agent log
+    *debug_marker = 0x50000002; // Marker for "after SUCCESS printf"
+    // #endregion
+  } else {
+    // #region agent log
+    *debug_marker = 0x60000001; // Marker for "about to print FAILURE"
+    // #endregion
+    printf("FAILURE: Array is NOT sorted.\n");
+  }
+
+  // #region agent log
+  *debug_marker = 0x70000000; // Marker for "about to return from main"
+  // #endregion
   return 0;
 }

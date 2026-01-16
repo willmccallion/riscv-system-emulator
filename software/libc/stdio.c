@@ -6,7 +6,13 @@ void putchar(char c) {
 }
 
 char getchar(void) {
-  // Read from memory-mapped UART
+  // Poll LSR (Line Status Register) at offset 5 until data is ready
+  // LSR bit 0 (0x01) = Data Ready (DR)
+  volatile unsigned char *lsr = (volatile unsigned char *)(UART_BASE + 5);
+  while ((*lsr & 0x01) == 0) {
+    // Wait for data to be available (blocking)
+  }
+  // Read from RBR (Receiver Buffer Register) at offset 0
   return *(volatile char *)UART_BASE;
 }
 

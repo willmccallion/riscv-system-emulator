@@ -1,13 +1,18 @@
 [package]
 name = "riscv-emulator"
 version = "3.0.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name = "riscv_emulator"
+path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.7"
 serde_json = "1.0"
+libc = "0.2"
 
 [features]
 always-trace = []

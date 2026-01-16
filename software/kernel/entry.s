@@ -108,4 +108,6 @@ restore_kernel:
     ld s11, 96(sp)
     addi sp, sp, 112
 
-    ret
+    # Use sret to properly return from supervisor trap
+    # This restores privilege mode, interrupt enable, and jumps to SEPC
+    sret

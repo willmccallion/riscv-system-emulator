@@ -1,0 +1,91 @@
+/dts-v1/;
+
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "riscv-virtio";
+    model = "riscv-virtio,qemu";
+
+    chosen {
+        bootargs = "root=/dev/vda rw console=ttyS0 earlycon=uart8250,mmio,0x10000000 rootwait";
+        stdout-path = "/soc/uart@10000000";
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        timebase-frequency = <10000000>;
+
+        cpu0: cpu@0 {
+            device_type = "cpu";
+            reg = <0>;
+            status = "okay";
+            compatible = "riscv";
+            riscv,isa = "rv64imafdc";
+            mmu-type = "riscv,sv39";
+
+            cpu0_intc: interrupt-controller {
+                #interrupt-cells = <1>;
+                interrupt-controller;
+                compatible = "riscv,cpu-intc";
+            };
+        };
+    };
+
+    /* Memory: 256MB @ 0x80000000 */
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x0 0x80000000 0x0 0x10000000>;
+    };
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        compatible = "simple-bus";
+        ranges;
+
+        clint@2000000 {
+            compatible = "riscv,clint0";
+            interrupts-extended = <&cpu0_intc 3 &cpu0_intc 7>;
+            reg = <0x0 0x2000000 0x0 0x10000>;
+        };
+
+        plic0: plic@c000000 {
+            compatible = "riscv,plic0";
+            interrupts-extended = <&cpu0_intc 11 &cpu0_intc 9>;
+            reg = <0x0 0xc000000 0x0 0x4000000>;
+            riscv,ndev = <35>;
+            interrupt-controller;
+            #interrupt-cells = <1>;
+        };
+
+        rtc@101000 {
+            compatible = "google,goldfish-rtc";
+            reg = <0x0 0x101000 0x0 0x1000>;
+            interrupt-parent = <&plic0>;
+            interrupts = <11>;
+        };
+
+        uart@10000000 {
+            compatible = "ns16550a";
+            reg = <0x0 0x10000000 0x0 0x100>;
+            interrupt-parent = <&plic0>;
+            interrupts = <10>;
+            clock-frequency = <10000000>;
+            current-speed = <115200>;
+            reg-shift = <0>;
+        };
+
+        virtio_mmio@10001000 {
+            compatible = "virtio,mmio";
+            reg = <0x0 0x10001000 0x0 0x1000>;
+            interrupt-parent = <&plic0>;
+            interrupts = <1>;
+        };
+
+        syscon@100000 {
+            compatible = "syscon", "sifive,test1";
+            reg = <0x0 0x100000 0x0 0x1000>;
+        };
+    };
+};
